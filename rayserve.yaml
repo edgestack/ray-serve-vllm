@@ -1,0 +1,100 @@
+---
+apiVersion: ray.io/v1
+kind: RayService
+metadata:
+  name: deepseek-r1
+spec:
+  serveConfigV2: |
+    applications:
+    - name: llm
+      route_prefix: /
+      import_path: serve:model
+      deployments:
+      - name: VLLMDeployment
+        num_replicas: 1
+        ray_actor_options:
+          num_cpus: 4
+      runtime_env:
+        working_dir: "https://github.com/edgestack/ray-serve-vllm/archive/main.zip"
+        pip: ["vllm==0.6.6.post1", "huggingface_hub"]
+        env_vars:
+          MODEL_ID: "/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
+          MODEL_NAME: "deepseek_r1"
+          TENSOR_PARALLELISM: "1"
+          PIPELINE_PARALLELISM: "1"
+          GPU_MEMORY_UTILIZATION: "0.9"
+          MAX_MODEL_LEN: "8192"
+  rayClusterConfig:
+    headGroupSpec:
+      rayStartParams:
+        dashboard-host: '0.0.0.0'
+      template:
+        spec:
+          containers:
+          - name: ray-head
+            image: rayproject/ray-ml:2.40.0.22541c-py310-cu121
+            resources:
+              limits:
+                cpu: "2"
+                memory: "4Gi"
+              requests:
+                cpu: "2"
+                memory: "4Gi"
+            ports:
+            - containerPort: 6379
+              name: gcs-server
+            - containerPort: 8265
+              name: dashboard
+            - containerPort: 10001
+              name: client
+            - containerPort: 8000
+              name: serve
+    workerGroupSpecs:
+    - replicas: 1
+      minReplicas: 1
+      maxReplicas: 1
+      groupName: gpu-group
+      rayStartParams: {}
+      template:
+        spec:
+          volumes:
+            - name: model-storage
+              persistentVolumeClaim:
+                claimName: llm-model-pvc
+          initContainers:
+            - name: model-downloader
+              image: python:3.11  # Use Python image to install and run Hugging Face downloader
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  pip install huggingface_hub
+                  mkdir -p /models/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B
+                  python -c "
+                  from huggingface_hub import snapshot_download
+                  snapshot_download(repo_id='deepseek-ai/DeepSeek-R1-Distill-Qwen-32B', local_dir='/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B')"
+              volumeMounts:
+                - mountPath: /models
+                  name: model-storage
+          containers:
+          - name: llm
+            image: rayproject/ray-ml:2.40.0.22541c-py310-cu121
+            resources:
+              limits:
+                cpu: "4"
+                memory: "20Gi"
+                nvidia.com/gpu: "1"
+              requests:
+                cpu: "4"
+                memory: "20Gi"
+                nvidia.com/gpu: "1"
+            volumeMounts:
+              - mountPath: /models
+                name: model-storage
+            env:
+              - name: MODEL_PATH
+                value: "/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
+          tolerations:
+            - key: "nvidia.com/gpu"
+              operator: "Exists"
+              effect: "NoSchedule"
